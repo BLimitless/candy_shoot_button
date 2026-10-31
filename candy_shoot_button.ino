@@ -94,7 +94,7 @@ const int FIRE_ANGLE = 120;  // "on"
 // How long to stay at FIRE_ANGLE before heading back. An SG90 needs about
 // 150 ms to swing 90 degrees, so keep this above ~200 ms or it may turn
 // around before it gets there.
-const unsigned long FIRE_HOLD_MS = 500;
+const unsigned long FIRE_HOLD_MS = 800;
 
 // Time allowed for a move to finish before the servo counts as idle again.
 // Presses during a shot (or during this time) are ignored.
