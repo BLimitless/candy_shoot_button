@@ -2,17 +2,18 @@
  * Candy Shoot Button - Arduino Uno R3 + SG90 servo
  * ================================================
  *
- * Press the giant button -> it puts out about 1.5 V for about 1 second ->
- * the servo swings from REST_ANGLE ("off") to FIRE_ANGLE ("on"), holds there
- * for FIRE_HOLD_MS, then swings back. One shot per press, however long the
- * signal lasts. Set TOGGLE_MODE to make each press flip between the two
- * positions instead.
+ * The giant button's signal idles at about 3.5 V. A press pulls it down, noisily,
+ * for about 5 seconds, and the sketch counts it once it has stayed down for 3.
+ * Each press swings the servo from REST_ANGLE ("off") to FIRE_ANGLE ("on"),
+ * holds it there for FIRE_HOLD_MS, then swings it back. One shot per press,
+ * however long the button is held. Set TOGGLE_MODE to make each press flip
+ * between the two positions instead.
  * *
  * WIRING (step by step in WIRING.md)
  * ----------------------------------
- *   Button signal (+1.5 V)   -> A0
+ *   Button signal            -> A0
  *   Button ground (-)        -> GND
- *   100k resistor            -> between A0 and GND (holds A0 at 0 V between presses)
+ *   100k resistor            -> between A0 and GND (holds A0 at 0 V if the button is unplugged)
  *   Servo orange (signal)    -> pin 9
  *   Servo red (+)            -> 5V
  *   Servo brown (-)          -> GND
@@ -29,7 +30,9 @@
  * TESTING
  * -------
  *   - Type f and press Enter in the Serial Monitor to fire without the button.
- *   - The Uno's "L" LED lights while the button signal is detected.
+ *   - The Uno's "L" LED lights for 1 second each time a press is detected.
+ *   - The Serial Monitor shows the average A0 voltage for each second, and
+ *     counts the low seconds during a press (PRINT_A0_AVERAGES).
  *   - Set PRINT_SIGNAL_LEVELS to true and open Tools > Serial Plotter to see
  *     what the button signal actually looks like on A0.
  */
@@ -46,18 +49,24 @@ const uint8_t SIGNAL_PIN = A0;
 // can sag to about 4.7 V; that only shifts the readings a few percent.
 const float ADC_REFERENCE_VOLTS = 5.0;
 
-// The signal counts as present once it rises above PRESS_THRESHOLD_VOLTS and
-// as gone once it falls below RELEASE_THRESHOLD_VOLTS. The gap between them
-// stops a noisy signal hovering near one threshold from flickering. 1.5 V,
-// or ~1.2 V once the button's battery is tired, clears 0.9 V comfortably.
-const float PRESS_THRESHOLD_VOLTS = 1.0;
-const float RELEASE_THRESHOLD_VOLTS = 0.5;
-
-// The signal must stay present this long to count as a press (ignores spikes
-// and noise), and stay gone this long before the next press can count (so
-// the ~1 second signal fires once, not repeatedly).
-const unsigned long PRESS_CONFIRM_MS = 250;
-const unsigned long RELEASE_CONFIRM_MS = 250;
+// The button's signal idles at about 3.4-3.6 V. A press pulls it down for
+// about 5 seconds, but not cleanly: it jumps around between roughly 0.5 V and
+// 3 V the whole time. So the sketch doesn't judge single readings. It
+// averages all the readings in each AVERAGE_WINDOW_MS, then:
+//   - a press counts once PRESS_WINDOWS averages in a row are below
+//     PRESS_THRESHOLD_VOLTS (3 one-second averages = low for 3 seconds), and
+//   - the press is over once an average is back above
+//     RELEASE_THRESHOLD_VOLTS. Only then can the next press count.
+// Noise can drag single readings down, but it can't hold a whole second's
+// average down for 3 seconds in a row.
+// The Serial Monitor prints every average, so you can check these numbers
+// against what your button actually does. Keep PRESS_THRESHOLD_VOLTS about
+// halfway between the idle and pressed averages, and RELEASE_THRESHOLD_VOLTS
+// between PRESS_THRESHOLD_VOLTS and the idle average.
+const unsigned long AVERAGE_WINDOW_MS = 1000;
+const uint8_t PRESS_WINDOWS = 3;
+const float PRESS_THRESHOLD_VOLTS = 2.75;
+const float RELEASE_THRESHOLD_VOLTS = 3.0;
 
 const uint8_t SERVO_PIN = 9;
 
@@ -66,8 +75,13 @@ const uint8_t SERVO_PIN = 9;
 const int SERVO_MIN_US = 544;
 const int SERVO_MAX_US = 2400;
 
-const int REST_ANGLE = 0;   // "off" - where the servo sits between shots
-const int FIRE_ANGLE = 90;  // "on"
+// Angles run 0-180, with 90 in the middle of the servo's travel. On this
+// servo, higher angles turn the arm clockwise as seen looking down on it.
+// A shot swings the arm from REST_ANGLE to FIRE_ANGLE and back, here 45
+// degrees clockwise. To swing the other way, use
+// FIRE_ANGLE = REST_ANGLE - 45.
+const int REST_ANGLE = 75;   // "off" - where the servo sits between shots
+const int FIRE_ANGLE = 120;  // "on"
 
 // How long to stay at FIRE_ANGLE before heading back. An SG90 needs about
 // 150 ms to swing 90 degrees, so keep this above ~200 ms or it may turn
@@ -90,7 +104,15 @@ const bool DETACH_WHEN_IDLE = false;
 // true = print the A0 voltage 20 times a second for Tools > Serial Plotter.
 const bool PRINT_SIGNAL_LEVELS = false;
 
+// true = print each AVERAGE_WINDOW_MS's average A0 voltage to the Serial
+// Monitor, with the lowest and highest single readings in it. Skipped while
+// PRINT_SIGNAL_LEVELS is true.
+const bool PRINT_A0_AVERAGES = true;
+
 const uint8_t STATUS_LED_PIN = LED_BUILTIN;  // the "L" LED, pin 13
+
+// The "L" LED lights for this long each time a press is detected.
+const unsigned long LED_ON_MS = 1000;
 
 // ---------------------------------------------------------------------------
 
@@ -105,39 +127,110 @@ ServoState servoState = SERVO_IDLE;
 unsigned long servoStateSince = 0;
 bool toggledOn = false;  // TOGGLE_MODE only: true while parked at FIRE_ANGLE
 
-bool signalPresent = false;             // debounced button signal
-unsigned long signalLastMatchedAt = 0;  // last time a raw reading agreed with signalPresent
+bool buttonPressed = false;         // from a detected press until the signal comes back up
+uint8_t lowWindowsInARow = 0;       // averages below PRESS_THRESHOLD_VOLTS in a row
+unsigned long windowStartedAt = 0;  // start of the current averaging window
+float windowSumVolts = 0;
+unsigned int windowReadings = 0;
+float windowLowestVolts = ADC_REFERENCE_VOLTS;
+float windowHighestVolts = 0;
+float lastVolts = 0;                // most recent single reading
+float lastAverageVolts = 0;         // most recent window's average
+bool ledOn = false;
+unsigned long ledOnSince = 0;       // when the "L" LED was last turned on
 unsigned long lastLevelPrintAt = 0;
 
 float readSignalVolts() {
   return analogRead(SIGNAL_PIN) * ADC_REFERENCE_VOLTS / 1023.0;
 }
 
-// One undebounced reading. The threshold depends on the current debounced
-// state, which is what gives the hysteresis.
-bool readRawSignal() {
-  float threshold = signalPresent ? RELEASE_THRESHOLD_VOLTS : PRESS_THRESHOLD_VOLTS;
-  return readSignalVolts() > threshold;
+void startWindow(unsigned long now) {
+  windowStartedAt = now;
+  windowSumVolts = 0;
+  windowReadings = 0;
+  windowLowestVolts = ADC_REFERENCE_VOLTS;
+  windowHighestVolts = 0;
 }
 
-// Debounces the button signal. Returns true once per press, PRESS_CONFIRM_MS
-// after the signal appears.
-bool buttonWasPressed(unsigned long now) {
-  bool raw = readRawSignal();
-  if (raw == signalPresent) {
-    signalLastMatchedAt = now;
-    return false;
+// Prints a line like "A0 average 1.85 V   (readings 0.72 to 2.95 V)   low 2 of 3".
+void printWindow(float average) {
+  Serial.print(F("A0 average "));
+  Serial.print(average, 2);
+  Serial.print(F(" V   (readings "));
+  Serial.print(windowLowestVolts, 2);
+  Serial.print(F(" to "));
+  Serial.print(windowHighestVolts, 2);
+  Serial.print(F(" V)   "));
+  if (buttonPressed) {
+    Serial.println(F("pressed"));
+  } else if (lowWindowsInARow > 0) {
+    Serial.print(F("low "));
+    Serial.print(lowWindowsInARow);
+    Serial.print(F(" of "));
+    Serial.println(PRESS_WINDOWS);
+  } else {
+    Serial.println(F("idle"));
   }
-  unsigned long confirmMs = raw ? PRESS_CONFIRM_MS : RELEASE_CONFIRM_MS;
-  if (now - signalLastMatchedAt < confirmMs) {
+}
+
+// Takes one reading and adds it to the current averaging window. At the end
+// of each window, checks its average. Returns true once per press.
+bool buttonWasPressed(unsigned long now) {
+  lastVolts = readSignalVolts();
+  windowSumVolts += lastVolts;
+  windowReadings++;
+  if (lastVolts < windowLowestVolts) {
+    windowLowestVolts = lastVolts;
+  }
+  if (lastVolts > windowHighestVolts) {
+    windowHighestVolts = lastVolts;
+  }
+  if (now - windowStartedAt < AVERAGE_WINDOW_MS) {
     return false;
   }
 
-  signalPresent = raw;
-  signalLastMatchedAt = now;
-  digitalWrite(STATUS_LED_PIN, signalPresent ? HIGH : LOW);
-  Serial.println(signalPresent ? F("Button signal on") : F("Button signal off"));
-  return signalPresent;
+  float average = windowSumVolts / windowReadings;
+  lastAverageVolts = average;
+  if (!buttonPressed) {
+    if (average < PRESS_THRESHOLD_VOLTS) {
+      lowWindowsInARow++;
+    } else {
+      lowWindowsInARow = 0;
+    }
+  }
+  if (PRINT_A0_AVERAGES && !PRINT_SIGNAL_LEVELS) {
+    printWindow(average);
+  }
+  startWindow(now);
+
+  if (buttonPressed) {
+    if (average > RELEASE_THRESHOLD_VOLTS) {
+      buttonPressed = false;
+      Serial.println(F("Button released"));
+    }
+    return false;
+  }
+  if (lowWindowsInARow >= PRESS_WINDOWS) {
+    buttonPressed = true;
+    lowWindowsInARow = 0;
+    Serial.println(F("Button pressed"));
+    return true;
+  }
+  return false;
+}
+
+void turnOnStatusLed(unsigned long now) {
+  digitalWrite(STATUS_LED_PIN, HIGH);
+  ledOn = true;
+  ledOnSince = now;
+}
+
+// Turns the "L" LED back off LED_ON_MS after it was turned on.
+void updateStatusLed(unsigned long now) {
+  if (ledOn && now - ledOnSince >= LED_ON_MS) {
+    digitalWrite(STATUS_LED_PIN, LOW);
+    ledOn = false;
+  }
 }
 
 void moveServo(int angle) {
@@ -208,7 +301,9 @@ void printSignalLevel(unsigned long now) {
   }
   lastLevelPrintAt = now;
   Serial.print(F("volts:"));
-  Serial.print(readSignalVolts(), 2);
+  Serial.print(lastVolts, 2);
+  Serial.print(F(" average:"));
+  Serial.print(lastAverageVolts, 2);
   Serial.print(F(" press:"));
   Serial.print(PRESS_THRESHOLD_VOLTS, 2);
   Serial.print(F(" release:"));
@@ -228,16 +323,16 @@ void setup() {
   setServoState(SERVO_MOVING, now);  // let it reach REST_ANGLE before accepting presses
 
   // Start from whatever the signal is doing right now, so a button held at
-  // power-up (or an input stuck on) can't fire until it turns off and on again.
-  signalPresent = readRawSignal();
-  signalLastMatchedAt = now;
-  digitalWrite(STATUS_LED_PIN, signalPresent ? HIGH : LOW);
+  // power-up (or an input stuck low) can't fire until it comes back up.
+  float volts = readSignalVolts();
+  buttonPressed = volts < PRESS_THRESHOLD_VOLTS;
+  startWindow(now);
 
   Serial.print(F("A0 is reading "));
-  Serial.print(readSignalVolts(), 2);
-  Serial.println(F(" V (should be near 0 with the button idle)"));
-  if (signalPresent) {
-    Serial.println(F("Button signal is already on - waiting for it to turn off first"));
+  Serial.print(volts, 2);
+  Serial.println(F(" V (should be about 3.5 with the button idle)"));
+  if (buttonPressed) {
+    Serial.println(F("A0 is already low (button held or unplugged) - waiting for it to come back up first"));
   }
   Serial.println(F("Ready. Press the button, or type f + Enter here to fire."));
 }
@@ -246,13 +341,15 @@ void loop() {
   unsigned long now = millis();
 
   if (buttonWasPressed(now)) {
+    turnOnStatusLed(now);
     fire(F("button"), now);
   }
   handleSerialCommands(now);
   updateServo(now);
+  updateStatusLed(now);
   if (PRINT_SIGNAL_LEVELS) {
     printSignalLevel(now);
   }
 
-  delay(5);  // ~200 readings a second is plenty for a 1 second signal
+  delay(5);  // ~200 readings a second, so each 1 second average uses ~200
 }
