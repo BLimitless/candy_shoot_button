@@ -130,7 +130,9 @@ arduino-cli monitor -p /dev/cu.usbmodemXXXX -c baudrate=115200
    `low 2 of 3`, `low 3 of 3`. Then, about 3–4 seconds after the press, the
    Uno's **L** LED (next to TX and RX, not the green **ON** power light)
    lights for 1 second and the Serial Monitor prints `Button pressed` then
-   `FIRE from button`.
+   `FIRE from button`. Once the servo is back at rest the status goes back
+   to idle, and when the button's signal ends it prints
+   `Button signal ended - ready for the next press`.
 4. Fit the servo arm last. At power-up the servo moves to its rest
    position (75°), so mount the arm in its "off"
    position after that.
@@ -144,7 +146,7 @@ arduino-cli monitor -p /dev/cu.usbmodemXXXX -c baudrate=115200
 | Uno restarts when the servo moves | Power problem. Check the capacitor, then see [Power](#power). |
 | `FIRE` prints but the servo doesn't move | Check servo red goes to 5V, brown to GND and orange to pin 9. With a separate supply, check its − is wired to GND on the Uno. |
 | Fires on its own with nothing pressed | The `A0 average` stayed below `PRESS_THRESHOLD_VOLTS` for `PRESS_WINDOWS` lines in a row. Averages near 0 V mean the button's signal wire is loose; also check the button's GROUND wire is connected. Otherwise lower `PRESS_THRESHOLD_VOLTS` (keeping it above the averages a press gives) or raise `PRESS_WINDOWS`. |
-| The per-second lines say `pressed` with nothing pressed | The average is stuck below `RELEASE_THRESHOLD_VOLTS`. Near 0 V usually means the button's signal wire isn't reaching A0, so the resistor pulls A0 to 0 V. |
+| The per-second lines keep saying `waiting for the last press's signal to end` | The average is stuck below `RELEASE_THRESHOLD_VOLTS`, so the sketch won't count a new press. Near 0 V usually means the button's signal wire isn't reaching A0, so the resistor pulls A0 to 0 V. |
 | **L** LED stays on all the time | The current sketch isn't running. Upload it again. |
 | Button press isn't detected | Watch the `A0 average` lines while pressing. They should drop below `PRESS_THRESHOLD_VOLTS` for 3 lines in a row. If they only drop partway, set `PRESS_THRESHOLD_VOLTS` about halfway between the idle and pressed averages, and keep `RELEASE_THRESHOLD_VOLTS` between it and the idle average. If the button's signal doesn't last 3 seconds, lower `PRESS_WINDOWS`. For a closer look, set `PRINT_SIGNAL_LEVELS = true` and open **Tools → Serial Plotter**. |
 | Fires twice per press | The average climbed above `RELEASE_THRESHOLD_VOLTS` partway through the press. Raise `RELEASE_THRESHOLD_VOLTS`, keeping it below the idle average. |

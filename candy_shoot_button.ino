@@ -55,8 +55,10 @@ const float ADC_REFERENCE_VOLTS = 5.0;
 // averages all the readings in each AVERAGE_WINDOW_MS, then:
 //   - a press counts once PRESS_WINDOWS averages in a row are below
 //     PRESS_THRESHOLD_VOLTS (3 one-second averages = low for 3 seconds), and
-//   - the press is over once an average is back above
-//     RELEASE_THRESHOLD_VOLTS. Only then can the next press count.
+//   - after the shot, the status goes back to idle once the servo is back at
+//     rest, but the next press only starts counting once an average is back
+//     above RELEASE_THRESHOLD_VOLTS (the button's signal has ended).
+//     Otherwise the rest of the same signal would count as a second press.
 // Noise can drag single readings down, but it can't hold a whole second's
 // average down for 3 seconds in a row.
 // The Serial Monitor prints every average, so you can check these numbers
@@ -127,7 +129,8 @@ ServoState servoState = SERVO_IDLE;
 unsigned long servoStateSince = 0;
 bool toggledOn = false;  // TOGGLE_MODE only: true while parked at FIRE_ANGLE
 
-bool buttonPressed = false;         // from a detected press until the signal comes back up
+bool buttonPressed = false;         // from a detected press until the servo is back at rest
+bool waitingForSignalToEnd = false; // from a detected press until the signal comes back up
 uint8_t lowWindowsInARow = 0;       // averages below PRESS_THRESHOLD_VOLTS in a row
 unsigned long windowStartedAt = 0;  // start of the current averaging window
 float windowSumVolts = 0;
@@ -163,6 +166,8 @@ void printWindow(float average) {
   Serial.print(F(" V)   "));
   if (buttonPressed) {
     Serial.println(F("pressed"));
+  } else if (waitingForSignalToEnd) {
+    Serial.println(F("idle (waiting for the last press's signal to end)"));
   } else if (lowWindowsInARow > 0) {
     Serial.print(F("low "));
     Serial.print(lowWindowsInARow);
@@ -191,7 +196,7 @@ bool buttonWasPressed(unsigned long now) {
 
   float average = windowSumVolts / windowReadings;
   lastAverageVolts = average;
-  if (!buttonPressed) {
+  if (!waitingForSignalToEnd) {
     if (average < PRESS_THRESHOLD_VOLTS) {
       lowWindowsInARow++;
     } else {
@@ -203,20 +208,30 @@ bool buttonWasPressed(unsigned long now) {
   }
   startWindow(now);
 
-  if (buttonPressed) {
+  if (waitingForSignalToEnd) {
     if (average > RELEASE_THRESHOLD_VOLTS) {
-      buttonPressed = false;
-      Serial.println(F("Button released"));
+      waitingForSignalToEnd = false;
+      Serial.println(F("Button signal ended - ready for the next press"));
     }
     return false;
   }
   if (lowWindowsInARow >= PRESS_WINDOWS) {
-    buttonPressed = true;
     lowWindowsInARow = 0;
+    buttonPressed = true;
+    waitingForSignalToEnd = true;
     Serial.println(F("Button pressed"));
     return true;
   }
   return false;
+}
+
+// The button counts as pressed until its shot is over and the servo is back
+// at rest.
+void updateButtonStatus() {
+  if (buttonPressed && servoState == SERVO_IDLE) {
+    buttonPressed = false;
+    Serial.println(F("Servo back at rest - button idle"));
+  }
 }
 
 void turnOnStatusLed(unsigned long now) {
@@ -325,13 +340,13 @@ void setup() {
   // Start from whatever the signal is doing right now, so a button held at
   // power-up (or an input stuck low) can't fire until it comes back up.
   float volts = readSignalVolts();
-  buttonPressed = volts < PRESS_THRESHOLD_VOLTS;
+  waitingForSignalToEnd = volts < PRESS_THRESHOLD_VOLTS;
   startWindow(now);
 
   Serial.print(F("A0 is reading "));
   Serial.print(volts, 2);
   Serial.println(F(" V (should be about 3.5 with the button idle)"));
-  if (buttonPressed) {
+  if (waitingForSignalToEnd) {
     Serial.println(F("A0 is already low (button held or unplugged) - waiting for it to come back up first"));
   }
   Serial.println(F("Ready. Press the button, or type f + Enter here to fire."));
@@ -346,6 +361,7 @@ void loop() {
   }
   handleSerialCommands(now);
   updateServo(now);
+  updateButtonStatus();
   updateStatusLed(now);
   if (PRINT_SIGNAL_LEVELS) {
     printSignalLevel(now);
