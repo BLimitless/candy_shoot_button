@@ -2,9 +2,9 @@
  * Candy Shoot Button - Arduino Uno R3 + SG90 servo
  * ================================================
  *
- * The giant button's signal idles somewhere around 2.5-3.5 V. A press pulls it
- * down, noisily, for about 5 seconds, and the sketch counts it once it has
- * stayed down for 3.
+ * The giant button's signal sits at 0 V while idle. A press makes it jump
+ * around between 0 V and peaks of about 1.5-1.75 V for about 5 seconds, and
+ * the sketch counts it once the peaks have kept coming for 3.
  * Each press swings the servo from REST_ANGLE ("off") to FIRE_ANGLE ("on"),
  * holds it there for FIRE_HOLD_MS, then swings it back. One shot per press,
  * however long the button is held. Set TOGGLE_MODE to make each press flip
@@ -32,8 +32,11 @@
  * -------
  *   - Type f and press Enter in the Serial Monitor to fire without the button.
  *   - The Uno's "L" LED lights for 1 second each time a press is detected.
- *   - The Serial Monitor shows the average A0 voltage for each second, and
- *     counts the low seconds during a press (PRINT_A0_AVERAGES).
+ *     With no Serial Monitor (on a wall adapter) it's the only sign that the
+ *     press was seen.
+ *   - The Serial Monitor shows the highest A0 reading (the peak) for each
+ *     second, and counts the seconds with signal during a press
+ *     (PRINT_A0_PEAKS).
  *   - Set PRINT_SIGNAL_LEVELS to true and open Tools > Serial Plotter to see
  *     what the button signal actually looks like on A0.
  */
@@ -50,32 +53,28 @@ const uint8_t SIGNAL_PIN = A0;
 // can sag to about 4.7 V; that only shifts the readings a few percent.
 const float ADC_REFERENCE_VOLTS = 5.0;
 
-// The button's signal idles somewhere around 2.5-3.5 V. Where exactly drifts
-// over time and changes with the setup, so the sketch doesn't use fixed
-// voltages. A press pulls the signal down for about 5 seconds, but not
-// cleanly: it jumps around the whole time. So the sketch:
-//   - averages all the readings in each AVERAGE_WINDOW_MS,
-//   - keeps track of the idle level, following it as it drifts,
-//   - counts a second as low when its average is more than PRESS_DROP_VOLTS
-//     below the idle level, and
-//   - counts a press once PRESS_WINDOWS seconds in a row are low.
-// Noise can drag single readings down, but it can't hold a whole second's
-// average down for 3 seconds in a row.
+// The button's signal sits at 0 V while idle. A press makes it jump around
+// for about 5 seconds: single readings land anywhere from 0 V up to peaks of
+// about 1.5-1.75 V, so the average swings about, but the peaks keep coming.
+// So the sketch:
+//   - finds the highest reading (the peak) in each WINDOW_MS,
+//   - counts a second as "signal" when its peak reaches SIGNAL_PEAK_VOLTS, and
+//   - counts a press once PRESS_WINDOWS seconds in a row have signal.
+// A single stray spike can't fire it, because it takes a peak in every one
+// of those seconds.
 // After the shot, the status goes back to idle once the servo is back at
-// rest. The next press only starts counting once the signal has climbed more
-// than halfway back from its lowest average to the idle level (the button's
-// signal has ended); otherwise the rest of the same signal would count as a
-// second press. The sketch then learns the idle level afresh, because it
-// often settles somewhere a little different after a press.
-// The Serial Monitor prints every average and the idle level, so you can
-// check these numbers against what your button actually does.
-const unsigned long AVERAGE_WINDOW_MS = 1000;
+// rest. The next press only starts counting after a whole second with no
+// signal (the button's signal has ended); otherwise the rest of the same
+// signal would count as a second press.
+// The Serial Monitor prints every second's peak, so you can check these
+// numbers against what your button actually does.
+const unsigned long WINDOW_MS = 1000;
 const uint8_t PRESS_WINDOWS = 3;
-const float PRESS_DROP_VOLTS = 0.5;
 
-// How quickly the idle level follows drift: each idle second moves it this
-// fraction of the way towards that second's average.
-const float IDLE_FOLLOW = 0.25;
+// Idle reads 0.00 V and a press peaks at 1.5 V or more, so this sits about
+// halfway between. That leaves room for the peaks getting lower, e.g. as the
+// button's batteries run down.
+const float SIGNAL_PEAK_VOLTS = 0.75;
 
 const uint8_t SERVO_PIN = 9;
 
@@ -113,10 +112,10 @@ const bool DETACH_WHEN_IDLE = false;
 // true = print the A0 voltage 20 times a second for Tools > Serial Plotter.
 const bool PRINT_SIGNAL_LEVELS = false;
 
-// true = print each AVERAGE_WINDOW_MS's average A0 voltage to the Serial
-// Monitor, with the lowest and highest single readings in it. Skipped while
+// true = print each WINDOW_MS's peak A0 voltage to the Serial Monitor, with
+// the average and lowest single reading in it. Skipped while
 // PRINT_SIGNAL_LEVELS is true.
-const bool PRINT_A0_AVERAGES = true;
+const bool PRINT_A0_PEAKS = true;
 
 const uint8_t STATUS_LED_PIN = LED_BUILTIN;  // the "L" LED, pin 13
 
@@ -137,18 +136,15 @@ unsigned long servoStateSince = 0;
 bool toggledOn = false;  // TOGGLE_MODE only: true while parked at FIRE_ANGLE
 
 bool buttonPressed = false;         // from a detected press until the servo is back at rest
-bool waitingForSignalToEnd = false; // from a detected press until the signal comes back up
-uint8_t lowWindowsInARow = 0;       // low averages in a row
-bool idleLevelKnown = false;        // false until the first average is in
-float idleLevelVolts = 0;           // the signal's average while idle
-float pressLowestVolts = 0;         // lowest average during the current press
-unsigned long windowStartedAt = 0;  // start of the current averaging window
+bool waitingForSignalToEnd = false; // from a detected press until a second with no signal
+uint8_t signalWindowsInARow = 0;    // seconds with signal in a row
+unsigned long windowStartedAt = 0;  // start of the current window
 float windowSumVolts = 0;
 unsigned int windowReadings = 0;
 float windowLowestVolts = ADC_REFERENCE_VOLTS;
-float windowHighestVolts = 0;
+float windowPeakVolts = 0;          // highest reading in the current window
 float lastVolts = 0;                // most recent single reading
-float lastAverageVolts = 0;         // most recent window's average
+float lastPeakVolts = 0;            // most recent window's peak
 bool ledOn = false;
 unsigned long ledOnSince = 0;       // when the "L" LED was last turned on
 unsigned long lastLevelPrintAt = 0;
@@ -162,28 +158,26 @@ void startWindow(unsigned long now) {
   windowSumVolts = 0;
   windowReadings = 0;
   windowLowestVolts = ADC_REFERENCE_VOLTS;
-  windowHighestVolts = 0;
+  windowPeakVolts = 0;
 }
 
 // Prints a line like
-// "A0 average 1.66 V   idle level 2.78 V   (readings 0.92 to 2.42 V)   low 1 of 3".
-void printWindow(float average) {
-  Serial.print(F("A0 average "));
-  Serial.print(average, 2);
-  Serial.print(F(" V   idle level "));
-  Serial.print(idleLevelVolts, 2);
-  Serial.print(F(" V   (readings "));
+// "A0 peak 1.74 V   (average 0.90 V, lowest 0.01 V)   signal 2 of 3".
+void printWindow() {
+  Serial.print(F("A0 peak "));
+  Serial.print(windowPeakVolts, 2);
+  Serial.print(F(" V   (average "));
+  Serial.print(windowSumVolts / windowReadings, 2);
+  Serial.print(F(" V, lowest "));
   Serial.print(windowLowestVolts, 2);
-  Serial.print(F(" to "));
-  Serial.print(windowHighestVolts, 2);
   Serial.print(F(" V)   "));
   if (buttonPressed) {
     Serial.println(F("pressed"));
   } else if (waitingForSignalToEnd) {
     Serial.println(F("idle (waiting for the last press's signal to end)"));
-  } else if (lowWindowsInARow > 0) {
-    Serial.print(F("low "));
-    Serial.print(lowWindowsInARow);
+  } else if (signalWindowsInARow > 0) {
+    Serial.print(F("signal "));
+    Serial.print(signalWindowsInARow);
     Serial.print(F(" of "));
     Serial.println(PRESS_WINDOWS);
   } else {
@@ -191,8 +185,8 @@ void printWindow(float average) {
   }
 }
 
-// Takes one reading and adds it to the current averaging window. At the end
-// of each window, checks its average. Returns true once per press.
+// Takes one reading and adds it to the current window. At the end of each
+// window, checks its peak. Returns true once per press.
 bool buttonWasPressed(unsigned long now) {
   lastVolts = readSignalVolts();
   windowSumVolts += lastVolts;
@@ -200,50 +194,34 @@ bool buttonWasPressed(unsigned long now) {
   if (lastVolts < windowLowestVolts) {
     windowLowestVolts = lastVolts;
   }
-  if (lastVolts > windowHighestVolts) {
-    windowHighestVolts = lastVolts;
+  if (lastVolts > windowPeakVolts) {
+    windowPeakVolts = lastVolts;
   }
-  if (now - windowStartedAt < AVERAGE_WINDOW_MS) {
+  if (now - windowStartedAt < WINDOW_MS) {
     return false;
   }
 
-  float average = windowSumVolts / windowReadings;
-  lastAverageVolts = average;
-  if (!idleLevelKnown) {
-    idleLevelVolts = average;
-    idleLevelKnown = true;
+  lastPeakVolts = windowPeakVolts;
+  bool hasSignal = windowPeakVolts >= SIGNAL_PEAK_VOLTS;
+  if (!hasSignal) {
+    signalWindowsInARow = 0;
+  } else if (!waitingForSignalToEnd) {
+    signalWindowsInARow++;
   }
-  bool low = average < idleLevelVolts - PRESS_DROP_VOLTS;
-
-  if (waitingForSignalToEnd) {
-    if (average < pressLowestVolts) {
-      pressLowestVolts = average;
-    }
-  } else if (low) {
-    if (lowWindowsInARow == 0 || average < pressLowestVolts) {
-      pressLowestVolts = average;
-    }
-    lowWindowsInARow++;
-  } else {
-    lowWindowsInARow = 0;
-    idleLevelVolts += (average - idleLevelVolts) * IDLE_FOLLOW;
-  }
-  if (PRINT_A0_AVERAGES && !PRINT_SIGNAL_LEVELS) {
-    printWindow(average);
+  if (PRINT_A0_PEAKS && !PRINT_SIGNAL_LEVELS) {
+    printWindow();
   }
   startWindow(now);
 
   if (waitingForSignalToEnd) {
-    float halfwayBack = (pressLowestVolts + idleLevelVolts) / 2;
-    if (average > halfwayBack) {
+    if (!hasSignal) {
       waitingForSignalToEnd = false;
-      idleLevelVolts = average;  // learn the idle level afresh
       Serial.println(F("Button signal ended - ready for the next press"));
     }
     return false;
   }
-  if (lowWindowsInARow >= PRESS_WINDOWS) {
-    lowWindowsInARow = 0;
+  if (signalWindowsInARow >= PRESS_WINDOWS) {
+    signalWindowsInARow = 0;
     buttonPressed = true;
     waitingForSignalToEnd = true;
     Serial.println(F("Button pressed"));
@@ -344,12 +322,10 @@ void printSignalLevel(unsigned long now) {
   lastLevelPrintAt = now;
   Serial.print(F("volts:"));
   Serial.print(lastVolts, 2);
-  Serial.print(F(" average:"));
-  Serial.print(lastAverageVolts, 2);
-  Serial.print(F(" idle:"));
-  Serial.print(idleLevelVolts, 2);
-  Serial.print(F(" press:"));
-  Serial.println(idleLevelVolts - PRESS_DROP_VOLTS, 2);
+  Serial.print(F(" peak:"));
+  Serial.print(lastPeakVolts, 2);
+  Serial.print(F(" threshold:"));
+  Serial.println(SIGNAL_PEAK_VOLTS, 2);
 }
 
 void setup() {
@@ -364,14 +340,11 @@ void setup() {
   moveServo(REST_ANGLE);
   setServoState(SERVO_MOVING, now);  // let it reach REST_ANGLE before accepting presses
 
-  // The first second's average becomes the idle level. A button held at
-  // power-up just makes that start low; the signal coming back up afterwards
-  // is a rise, not a drop, so it can't fire.
   startWindow(now);
 
   Serial.print(F("A0 is reading "));
   Serial.print(readSignalVolts(), 2);
-  Serial.println(F(" V (should be about 2.5-3.5 with the button idle)"));
+  Serial.println(F(" V (should be about 0 with the button idle)"));
   Serial.println(F("Ready. Press the button, or type f + Enter here to fire."));
 }
 
@@ -390,5 +363,7 @@ void loop() {
     printSignalLevel(now);
   }
 
-  delay(5);  // ~200 readings a second, so each 1 second average uses ~200
+  // ~900 readings a second. The more readings, the surer each second is to
+  // catch the signal's peaks.
+  delay(1);
 }
