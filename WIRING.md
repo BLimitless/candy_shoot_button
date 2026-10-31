@@ -22,7 +22,7 @@ Do this before connecting anything to the Uno.
 
 | Reading | Meaning |
 |---|---|
-| About **+3.5 V** while idle, dropping lower (and jumping around) for a few seconds when pressed | Correct. Red-probe wire = **SIGNAL**, black-probe wire = **GROUND**. |
+| About **+2.5 to +3.5 V** while idle, dropping lower (and jumping around) for a few seconds when pressed | Correct. Red-probe wire = **SIGNAL**, black-probe wire = **GROUND**. |
 | A **negative** voltage while idle | The wires are swapped. Swap them and measure again. |
 | ~0 V while idle, rising when pressed | The signal works the opposite way from what the sketch expects (a drop when pressed). The sketch would need changing. |
 | Anything above **5 V** | **Stop.** That would damage A0. |
@@ -43,7 +43,7 @@ button is pressed or not.
 | 100 kΩ resistor | Between **A0** and **GND** |
 
 Why A0 and not a digital pin: a 5 V Uno only reads a digital pin as HIGH
-reliably above 3.0 V, and the button's ~3.5 V idle is barely above that. A0
+reliably above 3.0 V, and the button's 2.5–3.5 V idle straddles that. A0
 measures the actual voltage, so the sketch can average it and spot a press
 even though the signal is noisy.
 
@@ -123,7 +123,7 @@ arduino-cli monitor -p /dev/cu.usbmodemXXXX -c baudrate=115200
 
 1. Open the Serial Monitor at **115200** baud. Opening it restarts the Uno,
    which prints `A0 is reading` and a voltage. With the button idle that
-   number should be about 3.5. After that it prints the average A0 voltage
+   number should be about 2.5–3.5. After that it prints the average A0 voltage
    for each second.
 2. Type **f** and press Enter. The servo should swing 45° (to 120°) and back.
 3. Press the giant button. The per-second lines count `low 1 of 3`,
@@ -145,12 +145,11 @@ arduino-cli monitor -p /dev/cu.usbmodemXXXX -c baudrate=115200
 |---|---|
 | Uno restarts when the servo moves | Power problem. Check the capacitor, then see [Power](#power). |
 | `FIRE` prints but the servo doesn't move | Check servo red goes to 5V, brown to GND and orange to pin 9. With a separate supply, check its − is wired to GND on the Uno. |
-| Fires on its own with nothing pressed | The `A0 average` stayed below `PRESS_THRESHOLD_VOLTS` for `PRESS_WINDOWS` lines in a row. Averages near 0 V mean the button's signal wire is loose; also check the button's GROUND wire is connected. Otherwise lower `PRESS_THRESHOLD_VOLTS` (keeping it above the averages a press gives) or raise `PRESS_WINDOWS`. |
-| The per-second lines keep saying `waiting for the last press's signal to end` | The average is stuck below `RELEASE_THRESHOLD_VOLTS`, so the sketch won't count a new press. Near 0 V usually means the button's signal wire isn't reaching A0, so the resistor pulls A0 to 0 V. |
+| Fires on its own with nothing pressed | The `A0 average` stayed more than `PRESS_DROP_VOLTS` below the idle level for `PRESS_WINDOWS` lines in a row. Averages near 0 V mean the button's signal wire is loose; also check the button's GROUND wire is connected. Otherwise raise `PRESS_DROP_VOLTS` (keeping it below the drop a real press gives) or raise `PRESS_WINDOWS`. |
+| The per-second lines keep saying `waiting for the last press's signal to end` | The average hasn't climbed more than halfway back from the press to the idle level, so the sketch won't count a new press. Near 0 V usually means the button's signal wire isn't reaching A0, so the resistor pulls A0 to 0 V. |
 | **L** LED stays on all the time | The current sketch isn't running. Upload it again. |
-| Button press isn't detected | Watch the `A0 average` lines while pressing. They should drop below `PRESS_THRESHOLD_VOLTS` for 3 lines in a row. If they only drop partway, set `PRESS_THRESHOLD_VOLTS` about halfway between the idle and pressed averages, and keep `RELEASE_THRESHOLD_VOLTS` between it and the idle average. If the button's signal doesn't last 3 seconds, lower `PRESS_WINDOWS`. For a closer look, set `PRINT_SIGNAL_LEVELS = true` and open **Tools → Serial Plotter**. |
-| Fires twice per press | The average climbed above `RELEASE_THRESHOLD_VOLTS` partway through the press. Raise `RELEASE_THRESHOLD_VOLTS`, keeping it below the idle average. |
-| Only the first press works | The idle average has dropped below `RELEASE_THRESHOLD_VOLTS`, so the sketch never sees the press end. Check the button's batteries, or set `RELEASE_THRESHOLD_VOLTS` about 0.3 V below the idle average (keeping it above `PRESS_THRESHOLD_VOLTS`). |
+| Button press isn't detected | Compare the `A0 average` with the `idle level` on each line while pressing. The average has to sit more than `PRESS_DROP_VOLTS` below the idle level for 3 lines in a row. If the drop is smaller, lower `PRESS_DROP_VOLTS` to about half of it. If the button's signal doesn't last 3 seconds, lower `PRESS_WINDOWS`. For a closer look, set `PRINT_SIGNAL_LEVELS = true` and open **Tools → Serial Plotter**. |
+| Fires twice per press | The signal climbed more than halfway back to the idle level partway through the press, then dropped again for 3 more seconds. Raise `PRESS_WINDOWS`. |
 | Servo buzzes or strains at one end | It's pushing against its end stop. Move that angle a few degrees in (e.g. 180 → 175, or 0 → 5). |
 | Servo jitters while idle | Set `DETACH_WHEN_IDLE = true`. |
 | Swings less than expected | Widen the pulse range: `SERVO_MIN_US = 500`, `SERVO_MAX_US = 2500`. |
