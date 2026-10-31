@@ -128,7 +128,8 @@ arduino-cli monitor -p /dev/cu.usbmodemXXXX -c baudrate=115200
    which prints `A0 is reading` and a voltage. With the button idle that
    number should be about 0. After that it prints the peak (highest) A0
    voltage for each second.
-2. Type **f** and press Enter. The servo should swing 45° (to 120°) and back.
+2. Type **f** and press Enter. The servo should swing 45° (to 120°) and back,
+   then give one quick extra open-and-close (the wiggle).
 3. Press the giant button. The per-second lines count `signal 1 of 3`,
    `signal 2 of 3`, `signal 3 of 3`. Then, about 3 seconds after the press, the
    Uno's **L** LED (next to TX and RX, not the green **ON** power light)

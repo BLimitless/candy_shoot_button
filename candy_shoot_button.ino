@@ -6,7 +6,8 @@
  * around between 0 V and peaks of about 1.5-1.75 V for about 5 seconds, and
  * the sketch counts it once the peaks have kept coming for 3.
  * Each press swings the servo from REST_ANGLE ("off") to FIRE_ANGLE ("on"),
- * holds it there for FIRE_HOLD_MS, then swings it back. One shot per press,
+ * holds it there for FIRE_HOLD_MS, then swings it back. Then it opens and
+ * closes once more, quickly, to shake loose anything jammed (WIGGLE). One shot per press,
  * however long the button is held. Set TOGGLE_MODE to make each press flip
  * between the two positions instead.
  * *
@@ -96,6 +97,15 @@ const int FIRE_ANGLE = 120;  // "on"
 // around before it gets there.
 const unsigned long FIRE_HOLD_MS = 800;
 
+// The wiggle: after the shot closes, the servo waits WIGGLE_CLOSED_MS (long
+// enough to get all the way back to REST_ANGLE), opens to FIRE_ANGLE again
+// for WIGGLE_OPEN_MS, then closes for good. A 45 degree swing takes an SG90
+// about 75 ms, so at 100 ms the arm only just gets fully open before heading
+// back. Raise WIGGLE_OPEN_MS for a bigger wiggle. Not used in TOGGLE_MODE.
+const bool WIGGLE = true;
+const unsigned long WIGGLE_CLOSED_MS = 200;
+const unsigned long WIGGLE_OPEN_MS = 100;
+
 // Time allowed for a move to finish before the servo counts as idle again.
 // Presses during a shot (or during this time) are ignored.
 const unsigned long MOVE_TIME_MS = 1000;
@@ -129,6 +139,8 @@ Servo servo;
 enum ServoState {
   SERVO_IDLE,      // at rest (or parked, in TOGGLE_MODE), ready for a press
   SERVO_AT_FIRE,   // at FIRE_ANGLE, waiting FIRE_HOLD_MS
+  SERVO_CLOSED_BEFORE_WIGGLE,  // back at REST_ANGLE, waiting WIGGLE_CLOSED_MS
+  SERVO_WIGGLE_OPEN,           // at FIRE_ANGLE again, waiting WIGGLE_OPEN_MS
   SERVO_MOVING,    // finishing a move, waiting MOVE_TIME_MS
 };
 ServoState servoState = SERVO_IDLE;
@@ -293,6 +305,12 @@ void fire(const __FlashStringHelper *source, unsigned long now) {
 void updateServo(unsigned long now) {
   unsigned long elapsed = now - servoStateSince;
   if (servoState == SERVO_AT_FIRE && elapsed >= FIRE_HOLD_MS) {
+    moveServo(REST_ANGLE);
+    setServoState(WIGGLE ? SERVO_CLOSED_BEFORE_WIGGLE : SERVO_MOVING, now);
+  } else if (servoState == SERVO_CLOSED_BEFORE_WIGGLE && elapsed >= WIGGLE_CLOSED_MS) {
+    moveServo(FIRE_ANGLE);
+    setServoState(SERVO_WIGGLE_OPEN, now);
+  } else if (servoState == SERVO_WIGGLE_OPEN && elapsed >= WIGGLE_OPEN_MS) {
     moveServo(REST_ANGLE);
     setServoState(SERVO_MOVING, now);
   } else if (servoState == SERVO_MOVING && elapsed >= MOVE_TIME_MS) {
