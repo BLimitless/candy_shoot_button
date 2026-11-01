@@ -4,4 +4,4 @@ When the button is pressed, the microcontroller catches it, then actuates a serv
 
 The code and electronics work well from this project. The hopper holding the candy gets jammed. 
 
-The author is the founder of <a href="www.pickitup.ai">
+The author is the founder of [Pick It Up](www.pickitup.ai)
